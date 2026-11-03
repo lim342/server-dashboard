@@ -120,6 +120,21 @@ function clampPercent(v: number | null): number | null {
   return Math.min(100, Math.max(0, v))
 }
 
+/** 掉线告警里的"失联多久",输出格式与前端 formatUptime 一致:如 "2 天 3 小时" / "3 小时 5 分" */
+function formatSince(ms: number): string {
+  const sec = Math.max(0, Math.floor((Date.now() - ms) / 1000))
+  const d = Math.floor(sec / 86400)
+  const h = Math.floor((sec % 86400) / 3600)
+  const m = Math.floor((sec % 3600) / 60)
+  if (d > 0) return `${d} 天 ${h} 小时`
+  if (h > 0) return `${h} 小时 ${m} 分`
+  return `${m} 分`
+}
+
+// 每张卡(host/index)最后一次观察到在线的时间,跨请求记忆:
+// 掉线占位卡用它展示"失联多久";服务重启后丢失,置空即可
+const lastOnlineAt = new Map<string, number>()
+
 export function seriesOf(samples: PromSeries[]): { ts: number[]; values: (number | null)[] } {
   if (!samples.length) return { ts: [], values: [] }
   const s = samples[0]
@@ -144,6 +159,7 @@ export async function collectOverview(): Promise<OverviewResponse> {
     uptime,
     uname,
     gpuUtil,
+    gpuSeenSamples,
     gpuMemUtil,
     gpuFbUsed,
     gpuFbFree,
@@ -165,6 +181,8 @@ export async function collectOverview(): Promise<OverviewResponse> {
     instantQuery(Q.uptime),
     instantQuery(Q.uname),
     instantQuery(Q.gpuUtil),
+    // 掉卡检测查询失败时退化为"不检测掉卡",不影响其余指标
+    instantQuery(Q.gpuSeen).catch(() => [] as PromSample[]),
     instantQuery(Q.gpuMemUtil),
     instantQuery(Q.gpuFbUsed),
     instantQuery(Q.gpuFbFree),
@@ -197,6 +215,23 @@ export async function collectOverview(): Promise<OverviewResponse> {
   mergeGpuMetric(gpuAcc, gpuPower, (g, v) => (g.powerW = v))
   mergeGpuMetric(gpuAcc, gpuSmClock, (g, v) => (g.smClockMHz = v))
   mergeGpuMetric(gpuAcc, gpuMemClock, (g, v) => (g.memClockMHz = v))
+
+  // 掉卡检测窗口内上报过真实样本的卡(hostname -> index -> 标签),
+  // 当前即时查询里没有的即视为掉线,用占位卡补回列表,避免"4 张卡掉 1 张只显示 3 张"。
+  // 不用 timestamp(last_over_time(...)) 取最后上报时间:实测所用 Prometheus(3.x)会把
+  // stale marker 当最后一个样本返回,时间恒为当前时刻,区分不出真实掉线。
+  const gpuSeen = new Map<string, Map<string, Record<string, string>>>()
+  for (const s of gpuSeenSamples) {
+    const h = s.metric.hostname
+    const idx = s.metric.gpu
+    if (!h || idx === undefined || toNum(s.value[1]) === null) continue
+    let perHost = gpuSeen.get(h)
+    if (!perHost) {
+      perHost = new Map()
+      gpuSeen.set(h, perHost)
+    }
+    if (!perHost.has(idx)) perHost.set(idx, s.metric)
+  }
 
   const hosts: HostSnapshot[] = []
   for (const [hostname, nodeSamples] of mUpNode) {
@@ -233,12 +268,17 @@ export async function collectOverview(): Promise<OverviewResponse> {
     const gpuPartials = [...(gpuAcc.get(hostname)?.values() ?? [])].sort(
       (a, b) => Number(a.index) - Number(b.index),
     )
+    const nowMs = Date.now()
+    for (const g of gpuPartials) lastOnlineAt.set(`${hostname}/${g.index}`, nowMs)
     const gpus: GpuSnapshot[] = gpuPartials.map((g) => ({
       index: g.index,
       uuid: g.uuid,
       device: g.device,
       model: g.model,
       driver: g.driver,
+      present: true,
+      missingKind: null,
+      lastSeenMs: null,
       util: g.util,
       memUtil: g.memUtil,
       memUsedMiB: g.fbUsed,
@@ -249,6 +289,33 @@ export async function collectOverview(): Promise<OverviewResponse> {
       smClockMHz: g.smClockMHz,
       memClockMHz: g.memClockMHz,
     }))
+    // 掉线占位:指标全部置空,保留窗口内最后一次的型号/驱动等标签。
+    // dcgm 采集器整机离线时该卡状态实为"未知"而非"掉卡",标为 collector:
+    // 前端区别展示(黄色),下方单卡掉线告警也按 dcgmUp 门控而跳过
+    for (const [idx, seen] of gpuSeen.get(hostname) ?? []) {
+      if (gpuPartials.some((g) => g.index === idx)) continue
+      gpus.push({
+        index: idx,
+        uuid: seen.UUID ?? '',
+        device: seen.device ?? '',
+        model: seen.modelName ?? '',
+        driver: seen.DCGM_FI_DRIVER_VERSION ?? '',
+        present: false,
+        missingKind: dcgmUp ? 'gpu' : 'collector',
+        lastSeenMs: lastOnlineAt.get(`${hostname}/${idx}`) ?? null,
+        util: null,
+        memUtil: null,
+        memUsedMiB: null,
+        memTotalMiB: null,
+        tempC: null,
+        memTempC: null,
+        powerW: null,
+        smClockMHz: null,
+        memClockMHz: null,
+      })
+    }
+    gpus.sort((a, b) => Number(a.index) - Number(b.index))
+    const liveGpuCount = gpuPartials.length
 
     const gpuUtilAvg = avgOf(gpus.map((g) => g.util))
     const gpuTempMax = maxOf(gpus.map((g) => g.tempC))
@@ -268,8 +335,18 @@ export async function collectOverview(): Promise<OverviewResponse> {
     if (!nodeUp) {
       alerts.push({ level: 'critical', title: '节点离线' })
     } else {
-      if (!dcgmUp && gpus.length === 0)
+      // 整机 dcgm 离线时占位卡依然会补出,判断"采集器离线"要看实时卡数
+      if (!dcgmUp && liveGpuCount === 0)
         alerts.push({ level: 'warning', title: 'GPU 采集器(dcgm)离线' })
+      if (dcgmUp) {
+        for (const g of gpus) {
+          if (!g.present)
+            alerts.push({
+              level: 'critical',
+              title: `GPU${g.index} 掉线${g.lastSeenMs ? ` ${formatSince(g.lastSeenMs)}` : ''}`,
+            })
+        }
+      }
       if (cpuPct !== null && cpuPct > THRESHOLDS.cpuPercent)
         alerts.push({ level: 'warning', title: `CPU 使用率 ${cpuPct.toFixed(0)}%` })
       if (memPct !== null && memPct > THRESHOLDS.memPercent)
@@ -343,7 +420,7 @@ export async function collectOverview(): Promise<OverviewResponse> {
     hostsTotal: hosts.length,
     hostsUp: upHosts.length,
     gpusTotal: allGpus.length,
-    gpusUp: upHosts.flatMap((h) => h.gpus).length,
+    gpusUp: upHosts.flatMap((h) => h.gpus).filter((g) => g.present).length,
     cpuPercent: avgOf(upHosts.map((h) => h.cpuPercent)),
     memUsedBytes: memUsedSum,
     memTotalBytes: memTotalSum,

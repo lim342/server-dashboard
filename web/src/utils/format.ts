@@ -61,6 +61,12 @@ export function shortGpuModel(model: string): string {
     .trim()
 }
 
+/** 失联占位卡的短文案:单卡掉线与"DCGM 采集器离线导致的无数据"区分开;在线卡返回空串 */
+export function gpuAbsentText(gpu: { present: boolean; missingKind: string | null }): string {
+  if (gpu.present) return ''
+  return gpu.missingKind === 'collector' ? '无数据' : '掉线'
+}
+
 export interface OsPretty {
   name: string
   kernel: string

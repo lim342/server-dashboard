@@ -11,6 +11,11 @@ export const THRESHOLDS = {
 const FS_FILTER =
   'fstype!~"tmpfs|devtmpfs|overlay|squashfs|iso9660|nsfs|ramfs|efivarfs|tracefs|autofs",' +
   'mountpoint!~"/run/.*|/var/snap/.*|/snap/.*"'
+/** 掉卡检测窗口:该窗口内上报过、当前无数据的 GPU 会以"掉线"占位展示。
+ *  注意窗口到期后占位卡与告警会一并消失(面板回到"从没这张卡"的状态),
+ *  取 30d 是为了让掉卡留痕足够久;手动拆走的卡会在面板上保留至多 30 天,介意可调小。 */
+export const GPU_MISSING_WINDOW = '30d'
+
 const NET_DEV_FILTER =
   'device!~"lo|docker.*|br-.*|veth.*|tailscale.*|cni.*|flannel.*|calico.*|vxlan.*|geneve.*|kube-ipvs.*|nodelocaldns.*|tunl.*|tun[0-9]*|tap.*|virbr.*|dummy.*"'
 
@@ -28,6 +33,10 @@ export const INSTANT_QUERIES = {
   uptime: 'time() - node_boot_time_seconds',
   uname: 'node_uname_info',
   gpuUtil: 'DCGM_FI_DEV_GPU_UTIL',
+  // 掉卡检测窗口内出现过(上报过真实样本)的卡。本方案不依赖 count_over_time
+  // 是否计入 stale marker:stale marker 只在序列消失后约 5 分钟内写入,
+  // 两种语义下"窗口内是否出现过"的判定结果一致
+  gpuSeen: `count_over_time(DCGM_FI_DEV_GPU_UTIL[${GPU_MISSING_WINDOW}])`,
   gpuMemUtil: 'DCGM_FI_DEV_MEM_COPY_UTIL',
   gpuFbUsed: 'DCGM_FI_DEV_FB_USED',
   gpuFbFree: 'DCGM_FI_DEV_FB_FREE',

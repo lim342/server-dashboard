@@ -11,6 +11,12 @@ export interface GpuSnapshot {
   device: string
   model: string
   driver: string
+  /** false = 失联占位:检测窗口内出现过、当前无数据 */
+  present: boolean
+  /** present=false 的原因:'gpu' = 采集器在线但该卡无数据(掉卡);'collector' = DCGM 采集器离线、状态未知。在线卡为 null */
+  missingKind: 'gpu' | 'collector' | null
+  /** 服务端最后一次观察到该卡在线的时间(毫秒,受轮询节奏影响略偏晚);在线卡为 null,服务重启后丢失 */
+  lastSeenMs: number | null
   util: number | null
   memUtil: number | null
   memUsedMiB: number | null

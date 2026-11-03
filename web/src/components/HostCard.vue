@@ -1,10 +1,10 @@
 <script setup lang="ts">
 import { computed } from 'vue'
 import { NTag } from 'naive-ui'
-import type { HostSnapshot } from '@/api/types'
+import type { GpuSnapshot, HostSnapshot } from '@/api/types'
 import StatusDot from './StatusDot.vue'
 import MetricBar from './MetricBar.vue'
-import { fmtW, formatUptime, shortGpuModel, utilColor } from '@/utils/format'
+import { fmtW, formatUptime, gpuAbsentText, shortGpuModel, utilColor } from '@/utils/format'
 
 const props = defineProps<{ host: HostSnapshot }>()
 const emit = defineEmits<{ (e: 'open', hostname: string): void }>()
@@ -24,6 +24,12 @@ function gpuFill(util: number | null): { width: string; background: string } {
     width: `${Math.min(100, Math.max(v, 1.5))}%`,
     background: utilColor(util),
   }
+}
+
+// 失联行样式:单卡掉线红色;采集器整机离线的"无数据"用中性灰
+function gpuRowClass(g: GpuSnapshot): string {
+  if (g.present) return ''
+  return g.missingKind === 'collector' ? 'nodata' : 'missing'
 }
 </script>
 
@@ -64,12 +70,17 @@ function gpuFill(util: number | null): { width: string; background: string } {
     </div>
 
     <div v-if="host.gpus.length" class="hc-gpus">
-      <div v-for="g in host.gpus" :key="g.index" class="hc-gpu">
+      <div v-for="g in host.gpus" :key="g.index" class="hc-gpu" :class="gpuRowClass(g)">
         <span class="gpu-idx">GPU{{ g.index }}</span>
-        <div class="gpu-track"><div class="gpu-fill" :style="gpuFill(g.util)" /></div>
+        <div class="gpu-track">
+          <div v-if="g.present" class="gpu-fill" :style="gpuFill(g.util)" />
+        </div>
         <span class="gpu-info">
-          {{ g.util === null ? '—' : `${Math.round(g.util)}%` }} ·
-          {{ g.tempC === null ? '—' : `${Math.round(g.tempC)}°C` }}
+          <template v-if="!g.present">{{ gpuAbsentText(g) }}</template>
+          <template v-else>
+            {{ g.util === null ? '—' : `${Math.round(g.util)}%` }} ·
+            {{ g.tempC === null ? '—' : `${Math.round(g.tempC)}°C` }}
+          </template>
         </span>
       </div>
     </div>
@@ -183,6 +194,17 @@ function gpuFill(util: number | null): { width: string; background: string } {
   color: var(--text3);
   width: 38px;
   flex: none;
+}
+.hc-gpu.missing .gpu-idx,
+.hc-gpu.missing .gpu-info {
+  color: #dc2626;
+}
+/* 失联行不渲染填充条,轨道改画虚线:掉线红色、无数据中性灰 */
+.hc-gpu.missing .gpu-track {
+  background: repeating-linear-gradient(90deg, #fca5a5 0 4px, transparent 4px 8px);
+}
+.hc-gpu.nodata .gpu-track {
+  background: repeating-linear-gradient(90deg, #cbd5e1 0 4px, transparent 4px 8px);
 }
 .gpu-track {
   flex: 1;

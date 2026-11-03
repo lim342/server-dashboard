@@ -26,6 +26,7 @@ import {
   formatMiB,
   formatRate,
   formatUptime,
+  gpuAbsentText,
   osPretty,
   shortGpuModel,
   utilColor,
@@ -414,7 +415,11 @@ const gpuPowerOption = computed<ChartOption | null>(() => {
                   v-for="gpu2 in host.gpus"
                   :key="gpu2.index"
                   :value="gpu2.index"
-                  :label="`GPU${gpu2.index} · ${shortGpuModel(gpu2.model)}`"
+                  :label="
+                    gpu2.present
+                      ? `GPU${gpu2.index} · ${shortGpuModel(gpu2.model)}`
+                      : `GPU${gpu2.index} · ${gpuAbsentText(gpu2)}`
+                  "
                 />
               </NRadioGroup>
             </div>
