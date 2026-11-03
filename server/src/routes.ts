@@ -53,6 +53,7 @@ router.get('/api/hosts/:hostname/history', async (req, res) => {
 
   let window: HistoryWindow
   let cacheKey: string
+  let ttlMs: number
 
   if (start !== undefined || end !== undefined) {
     // 自定义窗口:start/end 为毫秒时间戳
@@ -76,14 +77,17 @@ router.get('/api/hosts/:hostname/history', async (req, res) => {
     }
     window = { startS, endS }
     cacheKey = `history:${hostname}:custom:${startS}:${endS}`
+    // 窗口越大数据变化越不敏感,缓存随跨度伸缩(10 分钟 → 15s,7 天+ → 封顶 15 分钟)
+    ttlMs = Math.min(900_000, Math.max(15_000, (span * 1000) / 240))
   } else {
     const r = typeof range === 'string' && RANGES[range] ? range : '1h'
     window = { range: r }
     cacheKey = `history:${hostname}:${r}`
+    ttlMs = RANGES[r].ttlMs
   }
 
   try {
-    const data = await cached(cacheKey, 15_000, () => collectHostHistory(hostname, window))
+    const data = await cached(cacheKey, ttlMs, () => collectHostHistory(hostname, window))
     res.json(data)
   } catch (e) {
     errResponse(res, e)

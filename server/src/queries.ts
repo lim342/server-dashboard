@@ -83,11 +83,14 @@ export function hostHistoryQueries(hostname: string) {
   }
 }
 
-export const RANGES: Record<string, { sec: number; step: number }> = {
-  '1h': { sec: 3600, step: 30 },
-  '6h': { sec: 6 * 3600, step: 120 },
-  '24h': { sec: 24 * 3600, step: 480 },
-  '7d': { sec: 7 * 24 * 3600, step: 1800 },
+/** 各档位 sec/step/缓存 TTL。step 控制点数(~120-180 点);
+ *  TTL 随窗口放大:7d 图上 15 分钟的滞后只占宽度 0.15%,不可见,
+ *  却能把 30s 自动轮询对 Prometheus 的重复重打降为 15 分钟一次 */
+export const RANGES: Record<string, { sec: number; step: number; ttlMs: number }> = {
+  '1h': { sec: 3600, step: 30, ttlMs: 15_000 },
+  '6h': { sec: 6 * 3600, step: 120, ttlMs: 60_000 },
+  '24h': { sec: 24 * 3600, step: 480, ttlMs: 300_000 },
+  '7d': { sec: 7 * 24 * 3600, step: 3600, ttlMs: 900_000 },
 }
 
 /** 自定义时间窗口的边界 */

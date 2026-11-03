@@ -33,6 +33,28 @@ export interface HistoryWindow {
   endS?: number
 }
 
+/** 小并发池执行:18 条查询一齐打出去会压垮 Prometheus(互相拖慢、集体超时),
+ *  限到 6 条在途,完成的立刻补位。失败不中断其它任务,结果里 error 为该任务的异常 */
+async function runPooled<T>(
+  tasks: (() => Promise<T>)[],
+  limit: number,
+): Promise<(T | Error)[]> {
+  const results: (T | Error)[] = new Array(tasks.length)
+  let next = 0
+  async function worker() {
+    while (next < tasks.length) {
+      const i = next++
+      try {
+        results[i] = await tasks[i]()
+      } catch (e) {
+        results[i] = e instanceof Error ? e : new Error(String(e))
+      }
+    }
+  }
+  await Promise.all(Array.from({ length: Math.min(limit, tasks.length) }, worker))
+  return results
+}
+
 export async function collectHostHistory(
   hostname: string,
   opts: HistoryWindow,
@@ -56,7 +78,26 @@ export async function collectHostHistory(
   const q = hostHistoryQueries(hostname)
   const run = (promql: string) => rangeQuery(promql, startS, endS, step)
 
-  const [
+  // 部分失败容忍:长窗口下单条查询超时只丢该指标(图表显示为空),
+  // 全部失败才向上抛——那说明 Prometheus 真不可用
+  const keys = Object.keys(q) as (keyof typeof q)[]
+  const pooled = await runPooled(
+    keys.map((k) => () => run(q[k])),
+    6,
+  )
+  const results = {} as Record<keyof typeof q, PromSeries[]>
+  const errors: Error[] = []
+  keys.forEach((k, i) => {
+    const r = pooled[i]
+    if (r instanceof Error) {
+      results[k] = []
+      errors.push(r)
+    } else {
+      results[k] = r
+    }
+  })
+  if (errors.length === keys.length) throw errors[0]
+  const {
     cpu,
     load1,
     load5,
@@ -75,26 +116,7 @@ export async function collectHostHistory(
     gpuPower,
     gpuSmClock,
     gpuMemClock,
-  ] = await Promise.all([
-    run(q.cpu),
-    run(q.load1),
-    run(q.load5),
-    run(q.load15),
-    run(q.memUsed),
-    run(q.memAvailable),
-    run(q.memCached),
-    run(q.swapUsed),
-    run(q.netRx),
-    run(q.netTx),
-    run(q.gpuUtil),
-    run(q.gpuMemUtil),
-    run(q.gpuFbUsed),
-    run(q.gpuTemp),
-    run(q.gpuMemTemp),
-    run(q.gpuPower),
-    run(q.gpuSmClock),
-    run(q.gpuMemClock),
-  ])
+  } = results
 
   const gpus: GpuHistory = {
     util: groupGpuSeries(gpuUtil),

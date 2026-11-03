@@ -15,13 +15,17 @@ export interface PromSeries {
   values: [number, string][]
 }
 
-async function promGet<T>(path: string, params: Record<string, string>): Promise<T> {
+async function promGet<T>(
+  path: string,
+  params: Record<string, string>,
+  timeoutMs = 10_000,
+): Promise<T> {
   const url = new URL(path, PROM_URL)
   for (const [k, v] of Object.entries(params)) url.searchParams.set(k, v)
   let res: Response
   try {
     res = await fetch(url, {
-      signal: AbortSignal.timeout(10_000),
+      signal: AbortSignal.timeout(timeoutMs),
       headers: { Accept: 'application/json' },
     })
   } catch (e) {
@@ -52,12 +56,19 @@ export async function rangeQuery(
   endS: number,
   stepS: number,
 ): Promise<PromSeries[]> {
-  const data = await promGet<{ resultType: string; result: PromSeries[] }>('/api/v1/query_range', {
-    query: promql,
-    start: String(startS),
-    end: String(endS),
-    step: String(stepS),
-  })
+  // 长窗口 range 查询计算量大(且可能与其它请求的查询并发执行),
+  // 超时按窗口跨度放宽:15s 起、最长 60s;1h≈18s,6h 及以上封顶
+  const timeoutMs = Math.min(60_000, Math.max(15_000, ((endS - startS) * 1000) / 200))
+  const data = await promGet<{ resultType: string; result: PromSeries[] }>(
+    '/api/v1/query_range',
+    {
+      query: promql,
+      start: String(startS),
+      end: String(endS),
+      step: String(stepS),
+    },
+    timeoutMs,
+  )
   return data.result ?? []
 }
 
@@ -72,13 +83,25 @@ export async function prometheusVersion(): Promise<string | null> {
 
 // 极简 TTL 缓存:多个浏览器同时轮询时避免打爆 Prometheus
 const cache = new Map<string, { at: number; value: unknown }>()
+// 在途请求:同 key 并发未命中共享同一次上游查询,失败不缓存
+const inflight = new Map<string, Promise<unknown>>()
 
 export async function cached<T>(key: string, ttlMs: number, fn: () => Promise<T>): Promise<T> {
   const hit = cache.get(key)
   if (hit && Date.now() - hit.at < ttlMs) return hit.value as T
-  const value = await fn()
-  cache.set(key, { at: Date.now(), value })
-  return value
+  const running = inflight.get(key)
+  if (running) return running as Promise<T>
+  const p = (async () => {
+    try {
+      const value = await fn()
+      cache.set(key, { at: Date.now(), value })
+      return value
+    } finally {
+      inflight.delete(key)
+    }
+  })()
+  inflight.set(key, p)
+  return p
 }
 
 export function toNum(raw: string | undefined): number | null {
